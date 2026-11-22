@@ -1,3 +1,131 @@
+name: Build Debug APK
+
+# ---------------------------------------------------------------------------
+# Oppo Cleaner — জিপ-ভিত্তিক বিল্ড (v6, ফিক্স করা)
+#
+# কী বদলেছে v5 থেকে:
+#   - android-actions/setup-android@v3 বাদ দেওয়া হয়েছে। ওই ধাপেই আগের বিল্ড
+#     ফেল করেছিল ("Set up Android SDK")। GitHub-এর ubuntu-latest রানারে
+#     Android SDK আগে থেকেই ইনস্টল থাকে (/usr/local/lib/android/sdk),
+#     platform 35 ও build-tools 35.0.0 সহ। তাই আলাদা করে SDK নামানোর
+#     দরকার নেই — শুধু পথটা ঠিক করে দিলেই হয়।
+#   - local.properties-এ sdk.dir লিখে দেওয়া হয়, যাতে Gradle নিশ্চিতভাবে
+#     SDK খুঁজে পায়।
+#   - platform 35 না থাকলে sdkmanager দিয়ে ইনস্টল করার ফলব্যাক রাখা হয়েছে।
+#
+# রাখার জায়গা:  .github/workflows/build-apk.yml
+# ---------------------------------------------------------------------------
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Unzip source archive
+        run: |
+          set -euo pipefail
+          ZIP="$(ls -1 *.zip 2>/dev/null | head -1 || true)"
+          if [ -z "$ZIP" ]; then
+            echo "::error::রিপোর রুটে কোনো .zip ফাইল পাওয়া যায়নি। oppo-cleaner-source.zip আপলোড করুন।"
+            exit 1
+          fi
+          echo "Found archive: $ZIP"
+          unzip -q -o "$ZIP" -d _src
+          echo "--- extracted tree (2 levels) ---"
+          find _src -maxdepth 2 | head -40
+
+          if [ -f "_src/oppo-cleaner/gradlew" ]; then
+            SRC="_src/oppo-cleaner"
+          else
+            SRC="$(find _src -maxdepth 3 -name gradlew -printf '%h\n' | head -1)"
+          fi
+
+          if [ -z "${SRC:-}" ] || [ ! -f "$SRC/gradlew" ]; then
+            echo "::error::আনজিপ করা ফোল্ডারে gradlew পাওয়া যায়নি — জিপটা অসম্পূর্ণ হতে পারে।"
+            exit 1
+          fi
+          echo "SRC_DIR=$SRC" >> "$GITHUB_ENV"
+          echo "Source directory: $SRC"
+          ls -la "$SRC"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Use preinstalled Android SDK
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          echo "Using Android SDK at: $SDK"
+          ls "$SDK" || true
+
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "$SDK/platform-tools" >> "$GITHUB_PATH"
+
+          SDKM="$(command -v sdkmanager || true)"
+          if [ -z "$SDKM" ] && [ -x "$SDK/cmdline-tools/latest/bin/sdkmanager" ]; then
+            SDKM="$SDK/cmdline-tools/latest/bin/sdkmanager"
+            echo "$SDK/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          fi
+          echo "sdkmanager: ${SDKM:-not found}"
+
+          if [ ! -d "$SDK/platforms/android-35" ]; then
+            echo "platform 35 missing — installing"
+            if [ -n "${SDKM:-}" ]; then
+              yes | "$SDKM" --licenses > /dev/null 2>&1 || true
+              "$SDKM" "platforms;android-35" "build-tools;35.0.0"
+            else
+              echo "::error::platform 35 নেই এবং sdkmanager-ও পাওয়া যায়নি।"
+              exit 1
+            fi
+          else
+            echo "platform 35 already present"
+          fi
+
+          echo "sdk.dir=$SDK" > "$SRC_DIR/local.properties"
+          echo "--- local.properties ---"
+          cat "$SRC_DIR/local.properties"
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Build debug APK
+        run: |
+          set -euo pipefail
+          cd "$SRC_DIR"
+          chmod +x ./gradlew
+          ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: oppo-cleaner-debug-apk
+          path: ${{ env.SRC_DIR }}/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 90
 
 name: Build Debug APK
 
